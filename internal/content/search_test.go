@@ -106,7 +106,7 @@ func TestRenderSearchResultsProducesConciseAttributedMarkdown(t *testing.T) {
 	}}
 	output := renderSearchResults(matches, "Acme/widgets@main")
 	for _, expected := range []string{
-		"Found 1 relevant repository excerpt", "`Acme/widgets@main:internal/config.go#L10-L12`",
+		"Found 1 relevant repository excerpt", "**Repo:** `Acme/widgets@main`", "**File:** `internal/config.go#L10-L12`",
 		"https://github.com/Acme/widgets/blob/abc123/internal/config.go#L10-L12", "Context: symbol `Load`",
 		"```go\nfunc Load() {}\n```",
 	} {

@@ -59,9 +59,10 @@ func pathDocumentWhere(pattern string) (any, error) {
 }
 
 type SearchMatch struct {
-	Document string
-	Metadata map[string]any
-	Distance *float64
+	Document    string
+	Metadata    map[string]any
+	Distance    *float64
+	rerankScore float64
 }
 
 func parseSource(value string) (organization, repository, branch string, err error) {
@@ -163,7 +164,7 @@ func renderSearchResults(matches []SearchMatch, source string) string {
 		endLine := metadataInt(metadata, "end_line")
 
 		output.WriteString("\n---\n\n")
-		fmt.Fprintf(&output, "### %d. `%s/%s@%s:%s", index+1, organization, repository, branch, path)
+		fmt.Fprintf(&output, "### %d\n\n**Repo:** `%s/%s@%s`\n**File:** `%s", index+1, organization, repository, branch, path)
 		if startLine > 0 {
 			fmt.Fprintf(&output, "#L%d", startLine)
 			if endLine > startLine {

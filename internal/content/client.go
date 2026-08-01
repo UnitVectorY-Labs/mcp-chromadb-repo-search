@@ -9,6 +9,8 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -45,6 +47,19 @@ type queryResponse struct {
 	Distances [][]*float64       `json:"distances"`
 }
 
+type rerankRequest struct {
+	Model     string   `json:"model"`
+	Query     string   `json:"query"`
+	Documents []string `json:"documents"`
+}
+
+type rerankResponse struct {
+	Results []struct {
+		Index          int     `json:"index"`
+		RelevanceScore float64 `json:"relevance_score"`
+	} `json:"results"`
+}
+
 func NewClient(cfg Config) *Client {
 	return &Client{cfg: cfg, http: &http.Client{Timeout: cfg.RequestTimeout}}
 }
@@ -59,9 +74,16 @@ func (c *Client) Search(ctx context.Context, authHeader string, params SearchPar
 		return nil, err
 	}
 
-	candidateLimit := params.Limit * 3
-	if candidateLimit > 60 {
+	candidateMultiplier := 3
+	if c.rerankingEnabled() {
+		candidateMultiplier = c.cfg.RerankCandidateMultiplier
+	}
+	candidateLimit := params.Limit * candidateMultiplier
+	if !c.rerankingEnabled() && candidateLimit > 60 {
 		candidateLimit = 60
+	}
+	if c.rerankingEnabled() && candidateLimit > c.cfg.RerankMaxCandidates {
+		candidateLimit = c.cfg.RerankMaxCandidates
 	}
 	whereDocument, err := pathDocumentWhere(params.Path)
 	if err != nil {
@@ -91,7 +113,75 @@ func (c *Client) Search(ctx context.Context, authHeader string, params SearchPar
 		}
 		matches = append(matches, match)
 	}
+	if c.rerankingEnabled() {
+		if err := c.rerank(ctx, params.Query, matches); err != nil {
+			return nil, err
+		}
+	}
 	return selectMatches(matches, params.Limit), nil
+}
+
+func (c *Client) rerankingEnabled() bool {
+	return c.cfg.RerankAPIURL != "" && c.cfg.RerankModel != ""
+}
+
+func (c *Client) rerank(ctx context.Context, query string, matches []SearchMatch) error {
+	if len(matches) < 2 {
+		return nil
+	}
+	documents := make([]string, len(matches))
+	requestBytes := 0
+	for index, match := range matches {
+		document := rerankDocument(match)
+		if c.cfg.RerankMaxDocumentBytes > 0 && len(document) > c.cfg.RerankMaxDocumentBytes {
+			return fmt.Errorf("reranking document %d is %d bytes, exceeding rerank-max-document-bytes of %d", index, len(document), c.cfg.RerankMaxDocumentBytes)
+		}
+		requestBytes += len(document)
+		if c.cfg.RerankMaxRequestBytes > 0 && requestBytes > c.cfg.RerankMaxRequestBytes {
+			return fmt.Errorf("reranking request is %d bytes, exceeding rerank-max-request-bytes of %d", requestBytes, c.cfg.RerankMaxRequestBytes)
+		}
+		documents[index] = document
+	}
+	payload := rerankRequest{Model: c.cfg.RerankModel, Query: query, Documents: documents}
+	var response rerankResponse
+	if err := c.doJSON(ctx, "reranking request", c.cfg.RerankAPIURL+"/v1/rerank", payload, bearer(c.cfg.RerankAPIKey), &response); err != nil {
+		return err
+	}
+	if len(response.Results) != len(matches) {
+		return fmt.Errorf("reranking request returned %d results for %d documents", len(response.Results), len(matches))
+	}
+	seen := make([]bool, len(matches))
+	for _, result := range response.Results {
+		if result.Index < 0 || result.Index >= len(matches) || seen[result.Index] {
+			return fmt.Errorf("reranking request returned invalid result indices")
+		}
+		seen[result.Index] = true
+		matches[result.Index].rerankScore = result.RelevanceScore
+	}
+	for _, found := range seen {
+		if !found {
+			return fmt.Errorf("reranking request did not score every document")
+		}
+	}
+	sort.SliceStable(matches, func(i, j int) bool { return matches[i].rerankScore > matches[j].rerankScore })
+	return nil
+}
+
+func rerankDocument(match SearchMatch) string {
+	return rerankDocumentHeader(match) + "\n\n" + cleanDocument(match.Document)
+}
+
+func rerankDocumentHeader(match SearchMatch) string {
+	metadata := match.Metadata
+	repository := metadataString(metadata, "organization") + "/" + metadataString(metadata, "repository") + "@" + metadataString(metadata, "branch")
+	file := metadataString(metadata, "path")
+	if startLine := metadataInt(metadata, "start_line"); startLine > 0 {
+		file += "#L" + strconv.Itoa(startLine)
+		if endLine := metadataInt(metadata, "end_line"); endLine > startLine {
+			file += "-L" + strconv.Itoa(endLine)
+		}
+	}
+	return "Repository: " + repository + "\nFile: " + file
 }
 
 func (c *Client) embed(ctx context.Context, query string) ([]float32, error) {
