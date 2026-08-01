@@ -47,6 +47,40 @@ embedding:
 	}
 }
 
+func TestLoadConfigEnablesRerankingFromEnvironment(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	flags := NewFlagSet(fs)
+	if err := fs.Parse(nil); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(flags, []string{
+		"CHROMA_REPO_SEARCH_SERVER_URL=https://chroma.example.com",
+		"CHROMA_REPO_SEARCH_COLLECTION_NAME=repository-content",
+		"CHROMA_REPO_SEARCH_EMBEDDING_API_URL=https://embeddings.example.com",
+		"CHROMA_REPO_SEARCH_EMBEDDING_MODEL=embedding-model",
+		"CHROMA_REPO_SEARCH_RERANK_API_URL=https://rerank.example.com/",
+		"CHROMA_REPO_SEARCH_RERANK_MODEL=qwen3-reranker-4b-q6k",
+		"CHROMA_REPO_SEARCH_RERANK_CANDIDATE_MULTIPLIER=4",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RerankAPIURL != "https://rerank.example.com" || cfg.RerankModel != "qwen3-reranker-4b-q6k" || cfg.RerankCandidateMultiplier != 4 || cfg.RerankMaxCandidates != 100 || cfg.RerankMaxDocumentBytes != 0 || cfg.RerankMaxRequestBytes != 0 {
+		t.Fatalf("unexpected reranking config: %+v", cfg)
+	}
+}
+
+func TestLoadConfigRejectsIncompleteRerankingConfiguration(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	flags := NewFlagSet(fs)
+	if err := fs.Parse([]string{"--server-url", "https://chroma.example.com", "--collection-name", "repository-content", "--embedding-api-url", "https://embeddings.example.com", "--embedding-model", "embedding-model", "--rerank-model", "reranker"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig(flags, nil); err == nil || err.Error() != "rerank-api-url and rerank-model must be configured together" {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestLoadConfigRequiresEmbeddingSettings(t *testing.T) {
 	tests := []struct {
 		name string

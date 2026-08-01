@@ -6,7 +6,7 @@ An MCP server for semantically searching GitHub repository content indexed in Ch
 
 Its partner project is [`chromadb-repo-indexer`](https://github.com/UnitVectorY-Labs/chromadb-repo-indexer) which is a GitHub action for loading the repository content into ChromaDB.
 
-The server is read-only. It embeds a search query with an OpenAI-compatible endpoint, retrieves candidates from Chroma's v2 API, removes duplicate content, and favors evidence from different files. It returns concise, source-attributed Markdown designed to be used directly as RAG context. It supports local MCP over stdio and remote MCP over Streamable HTTP.
+The server is read-only. It embeds a search query with an OpenAI-compatible endpoint, retrieves candidates from Chroma's v2 API, and can optionally rerank those candidates with an OpenAI-compatible reranking endpoint before removing duplicate content and favoring evidence from different files. It returns concise, source-attributed Markdown designed to be used directly as RAG context. It supports local MCP over stdio and remote MCP over Streamable HTTP.
 
 ## Installation
 
@@ -37,6 +37,11 @@ export CHROMA_REPO_SEARCH_DATABASE=default_database
 export CHROMA_REPO_SEARCH_EMBEDDING_API_URL=https://embeddings.example.com
 export CHROMA_REPO_SEARCH_EMBEDDING_MODEL=your-embedding-model
 export CHROMA_REPO_SEARCH_EMBEDDING_API_KEY=your-optional-embedding-key
+# Optional: enable OpenAI-compatible reranking. The server retrieves three
+# candidates for each requested result, reranks them, then returns the requested limit.
+export CHROMA_REPO_SEARCH_RERANK_API_URL=https://rerank.example.com
+export CHROMA_REPO_SEARCH_RERANK_MODEL=your-reranker-model
+export CHROMA_REPO_SEARCH_RERANK_API_KEY=your-optional-reranking-key
 
 ./mcp-chromadb-repo-search
 ```
@@ -56,7 +61,10 @@ An MCP client configuration can launch it directly:
         "CHROMA_REPO_SEARCH_DATABASE": "default_database",
         "CHROMA_REPO_SEARCH_EMBEDDING_API_URL": "https://embeddings.example.com",
         "CHROMA_REPO_SEARCH_EMBEDDING_MODEL": "your-embedding-model",
-        "CHROMA_REPO_SEARCH_EMBEDDING_API_KEY": "your-optional-embedding-key"
+        "CHROMA_REPO_SEARCH_EMBEDDING_API_KEY": "your-optional-embedding-key",
+        "CHROMA_REPO_SEARCH_RERANK_API_URL": "https://rerank.example.com",
+        "CHROMA_REPO_SEARCH_RERANK_MODEL": "your-reranker-model",
+        "CHROMA_REPO_SEARCH_RERANK_API_KEY": "your-optional-reranking-key"
       }
     }
   }
@@ -81,7 +89,7 @@ The compact interface is deliberate:
 - `query` controls semantic ranking.
 - `source` is the one high-value deterministic filter for repository RAG. Branch selection is included without adding another parameter.
 - `path` narrows retrieval before vector ranking. `*` matches any number of characters, including nested folders; `**/` also matches zero or more folders; and `?` matches one character.
-- `limit` controls context size. The server retrieves up to three times as many candidates internally, removes duplicate text, and prefers different source files before filling the requested limit.
+- `limit` controls context size. The server retrieves up to three times as many candidates internally. When reranking is enabled, it reranks those candidates before removing duplicate text, preferring different source files, and filling the requested limit.
 
 Raw Chroma distances are not exposed because their scale depends on the collection metric and embedding model. Ranking is preserved, while misleading cross-model score normalization is avoided. Internal record IDs, hashes, schema versions, and chunking metadata are also omitted.
 
@@ -135,9 +143,22 @@ Precedence is command-line flags, environment variables, explicitly selected YAM
 | `--embedding-api-url` | `CHROMA_REPO_SEARCH_EMBEDDING_API_URL` | required |
 | `--embedding-model` | `CHROMA_REPO_SEARCH_EMBEDDING_MODEL` | required |
 | `--embedding-api-key` | `CHROMA_REPO_SEARCH_EMBEDDING_API_KEY` | empty |
+| `--rerank-api-url` | `CHROMA_REPO_SEARCH_RERANK_API_URL` | empty (reranking disabled) |
+| `--rerank-model` | `CHROMA_REPO_SEARCH_RERANK_MODEL` | empty (reranking disabled) |
+| `--rerank-api-key` | `CHROMA_REPO_SEARCH_RERANK_API_KEY` | empty |
+| `--rerank-candidate-multiplier` | `CHROMA_REPO_SEARCH_RERANK_CANDIDATE_MULTIPLIER` | `3` |
+| `--rerank-max-candidates` | `CHROMA_REPO_SEARCH_RERANK_MAX_CANDIDATES` | `100` |
+| `--rerank-max-document-bytes` | `CHROMA_REPO_SEARCH_RERANK_MAX_DOCUMENT_BYTES` | `0` (unlimited) |
+| `--rerank-max-request-bytes` | `CHROMA_REPO_SEARCH_RERANK_MAX_REQUEST_BYTES` | `0` (unlimited) |
 | `--http` | `MCP_CHROMADB_REPO_SEARCH_HTTP` | empty (stdio) |
 | `--debug` | `MCP_CHROMADB_REPO_SEARCH_DEBUG` | `false` |
 | `--request-timeout` | `MCP_CHROMADB_REPO_SEARCH_REQUEST_TIMEOUT` | `120s` |
+
+Reranking is opt-in: set both `--rerank-api-url` and `--rerank-model` (or their environment variables). The server calls `POST /v1/rerank` with the query and retrieved candidate text, then returns only the requested `limit`; its candidate multiplier must be at least `2`.
+
+The reranker receives a `Repository: owner/repository@branch` and `File: path#Lstart-Lend` header before every candidate body. Every selected Chroma record is sent in full: the companion indexer stores complete chunks (512 tokens by default), not complete source files. Candidate retrieval is `min(limit × multiplier, max-candidates)`, so the default is 30 candidates for `limit: 10` and the 100-candidate setting is a ceiling, not an always-on target.
+
+Models and endpoints have different context and request limits. Set either byte limit when the deployed reranker requires one; zero leaves it unlimited. If a configured limit would be exceeded, search returns an explicit error rather than silently truncating a chunk and changing its relevance score. Tune `rerank-max-candidates`, `rerank-max-document-bytes`, and `rerank-max-request-bytes` together for the deployed model.
 
 `--version` prints the build and Go runtime version. Tokens may be supplied with or without the `Bearer ` prefix. Secrets are never logged; debug output reports operations and endpoints only.
 

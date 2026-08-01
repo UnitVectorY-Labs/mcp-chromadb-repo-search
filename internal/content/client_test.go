@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -78,6 +79,74 @@ func TestClientSearch(t *testing.T) {
 	}
 }
 
+func TestClientSearchReranksCandidatesBeforeLimiting(t *testing.T) {
+	var queryPayload queryRequest
+	var rerankPayload rerankRequest
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/embeddings", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"index": 0, "embedding": []float32{0.1}}}})
+	})
+	mux.HandleFunc("/api/v2/tenants/tenant/databases/database/collections/repository-content", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(Collection{ID: "collection-id"})
+	})
+	mux.HandleFunc("/api/v2/tenants/tenant/databases/database/collections/collection-id/query", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&queryPayload)
+		documents := make([]*string, 6)
+		metadata := make([]map[string]any, 6)
+		for index := range documents {
+			document := "Source: Acme/widgets@main:file" + string(rune('a'+index)) + ".go\n\ncontent " + string(rune('a'+index))
+			documents[index] = &document
+			metadata[index] = map[string]any{"organization": "Acme", "repository": "widgets", "branch": "main", "path": "file" + string(rune('a'+index)) + ".go"}
+		}
+		_ = json.NewEncoder(w).Encode(queryResponse{IDs: [][]string{{"0", "1", "2", "3", "4", "5"}}, Documents: [][]*string{documents}, Metadatas: [][]map[string]any{metadata}})
+	})
+	mux.HandleFunc("/v1/rerank", func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer rerank-secret" {
+			t.Errorf("reranking authorization = %q", got)
+		}
+		_ = json.NewDecoder(r.Body).Decode(&rerankPayload)
+		_ = json.NewEncoder(w).Encode(rerankResponse{Results: []struct {
+			Index          int     `json:"index"`
+			RelevanceScore float64 `json:"relevance_score"`
+		}{
+			{Index: 4, RelevanceScore: 0.99}, {Index: 1, RelevanceScore: 0.80}, {Index: 0, RelevanceScore: 0.5},
+			{Index: 2, RelevanceScore: 0.4}, {Index: 3, RelevanceScore: 0.3}, {Index: 5, RelevanceScore: 0.2},
+		}})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client := NewClient(Config{
+		ServerURL: server.URL, CollectionName: "repository-content", Tenant: "tenant", Database: "database", RetryAttempts: 1,
+		EmbeddingAPIURL: server.URL, EmbeddingModel: "embedding-model", RequestTimeout: time.Second,
+		RerankAPIURL: server.URL, RerankModel: "reranker", RerankAPIKey: "rerank-secret", RerankCandidateMultiplier: 3,
+		RerankMaxCandidates: 100, RerankMaxDocumentBytes: 12000, RerankMaxRequestBytes: 240000,
+	})
+	result, err := client.Search(context.Background(), "", SearchParams{Query: "gogitup flags", Limit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queryPayload.NResults != 6 {
+		t.Fatalf("n_results = %d, want 6 reranking candidates", queryPayload.NResults)
+	}
+	if rerankPayload.Model != "reranker" || rerankPayload.Query != "gogitup flags" {
+		t.Fatalf("unexpected reranking payload: %+v", rerankPayload)
+	}
+	if !reflect.DeepEqual(rerankPayload.Documents, []string{
+		"Repository: Acme/widgets@main\nFile: filea.go\n\ncontent a",
+		"Repository: Acme/widgets@main\nFile: fileb.go\n\ncontent b",
+		"Repository: Acme/widgets@main\nFile: filec.go\n\ncontent c",
+		"Repository: Acme/widgets@main\nFile: filed.go\n\ncontent d",
+		"Repository: Acme/widgets@main\nFile: filee.go\n\ncontent e",
+		"Repository: Acme/widgets@main\nFile: filef.go\n\ncontent f",
+	}) {
+		t.Fatalf("reranking documents = %#v", rerankPayload.Documents)
+	}
+	if len(result) != 2 || !strings.Contains(result[0].Document, "content e") || !strings.Contains(result[1].Document, "content b") {
+		t.Fatalf("reranked results = %+v", result)
+	}
+}
+
 func TestBearer(t *testing.T) {
 	for input, expected := range map[string]string{"": "", "token": "Bearer token", "Bearer token": "Bearer token", "bearer token": "bearer token"} {
 		if got := bearer(input); got != expected {
@@ -94,5 +163,30 @@ func TestChromaAuthorizationPassThrough(t *testing.T) {
 	client.cfg.BearerToken = "configured"
 	if got := client.chromaAuthorization("Bearer incoming"); got != "Bearer configured" {
 		t.Fatalf("configured authorization = %q", got)
+	}
+}
+
+func TestRerankDocumentIncludesRepositoryAndFileLocation(t *testing.T) {
+	document := rerankDocument(SearchMatch{
+		Document: "Source: Acme/widgets@main:docs/usage.md\n\ncontent",
+		Metadata: map[string]any{
+			"organization": "Acme", "repository": "widgets", "branch": "main", "path": "docs/usage.md",
+			"start_line": 30, "end_line": 59,
+		},
+	})
+	if document != "Repository: Acme/widgets@main\nFile: docs/usage.md#L30-L59\n\ncontent" {
+		t.Fatalf("reranking document = %q", document)
+	}
+}
+
+func TestRerankRejectsConfiguredLimitWithoutTruncating(t *testing.T) {
+	client := NewClient(Config{RerankAPIURL: "https://rerank.example.com", RerankModel: "reranker", RerankMaxDocumentBytes: 20})
+	matches := []SearchMatch{
+		{Document: "one", Metadata: map[string]any{"organization": "Acme", "repository": "widgets", "branch": "main", "path": "first.go"}},
+		{Document: "two", Metadata: map[string]any{"organization": "Acme", "repository": "widgets", "branch": "main", "path": "second.go"}},
+	}
+	err := client.rerank(context.Background(), "query", matches)
+	if err == nil || !strings.Contains(err.Error(), "rerank-max-document-bytes") {
+		t.Fatalf("error = %v", err)
 	}
 }

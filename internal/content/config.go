@@ -17,36 +17,50 @@ import (
 var collectionNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{1,510}[A-Za-z0-9]$`)
 
 type Config struct {
-	ServerURL       string
-	CollectionName  string
-	BearerToken     string
-	Tenant          string
-	Database        string
-	RetryAttempts   int
-	EmbeddingAPIURL string
-	EmbeddingModel  string
-	EmbeddingAPIKey string
-	HTTPAddr        string
-	Debug           bool
-	RequestTimeout  time.Duration
+	ServerURL                 string
+	CollectionName            string
+	BearerToken               string
+	Tenant                    string
+	Database                  string
+	RetryAttempts             int
+	EmbeddingAPIURL           string
+	EmbeddingModel            string
+	EmbeddingAPIKey           string
+	RerankAPIURL              string
+	RerankModel               string
+	RerankAPIKey              string
+	RerankCandidateMultiplier int
+	RerankMaxCandidates       int
+	RerankMaxDocumentBytes    int
+	RerankMaxRequestBytes     int
+	HTTPAddr                  string
+	Debug                     bool
+	RequestTimeout            time.Duration
 }
 
 type FlagValues struct {
-	set             *flag.FlagSet
-	ServerURL       string
-	CollectionName  string
-	BearerToken     string
-	Tenant          string
-	Database        string
-	ConfigFile      string
-	RetryAttempts   int
-	EmbeddingAPIURL string
-	EmbeddingModel  string
-	EmbeddingAPIKey string
-	HTTPAddr        string
-	Debug           bool
-	RequestTimeout  time.Duration
-	Version         bool
+	set                       *flag.FlagSet
+	ServerURL                 string
+	CollectionName            string
+	BearerToken               string
+	Tenant                    string
+	Database                  string
+	ConfigFile                string
+	RetryAttempts             int
+	EmbeddingAPIURL           string
+	EmbeddingModel            string
+	EmbeddingAPIKey           string
+	RerankAPIURL              string
+	RerankModel               string
+	RerankAPIKey              string
+	RerankCandidateMultiplier int
+	RerankMaxCandidates       int
+	RerankMaxDocumentBytes    int
+	RerankMaxRequestBytes     int
+	HTTPAddr                  string
+	Debug                     bool
+	RequestTimeout            time.Duration
+	Version                   bool
 }
 
 func NewFlagSet(fs *flag.FlagSet) *FlagValues {
@@ -61,6 +75,13 @@ func NewFlagSet(fs *flag.FlagSet) *FlagValues {
 	fs.StringVar(&v.EmbeddingAPIURL, "embedding-api-url", "", "OpenAI-compatible embeddings API origin")
 	fs.StringVar(&v.EmbeddingModel, "embedding-model", "", "embeddings model name")
 	fs.StringVar(&v.EmbeddingAPIKey, "embedding-api-key", "", "optional embeddings API key")
+	fs.StringVar(&v.RerankAPIURL, "rerank-api-url", "", "OpenAI-compatible reranking API origin; enables reranking with --rerank-model")
+	fs.StringVar(&v.RerankModel, "rerank-model", "", "reranking model name; enables reranking with --rerank-api-url")
+	fs.StringVar(&v.RerankAPIKey, "rerank-api-key", "", "optional reranking API key")
+	fs.IntVar(&v.RerankCandidateMultiplier, "rerank-candidate-multiplier", 0, "number of Chroma candidates per requested result when reranking (minimum 2)")
+	fs.IntVar(&v.RerankMaxCandidates, "rerank-max-candidates", 0, "maximum candidates sent to the reranker")
+	fs.IntVar(&v.RerankMaxDocumentBytes, "rerank-max-document-bytes", 0, "maximum UTF-8 bytes sent for one reranking document, including its source header")
+	fs.IntVar(&v.RerankMaxRequestBytes, "rerank-max-request-bytes", 0, "maximum UTF-8 bytes in the reranking request documents")
 	fs.StringVar(&v.HTTPAddr, "http", "", "run Streamable HTTP on an address or port (defaults to stdio)")
 	fs.BoolVar(&v.Debug, "debug", false, "enable debug logging to stderr")
 	fs.DurationVar(&v.RequestTimeout, "request-timeout", 0, "timeout for each backend request")
@@ -106,10 +127,14 @@ type yamlConfig struct {
 func LoadConfig(flags *FlagValues, environ []string) (Config, error) {
 	env := envMap(environ)
 	cfg := Config{
-		Tenant:         "default_tenant",
-		Database:       "default_database",
-		RetryAttempts:  3,
-		RequestTimeout: 120 * time.Second,
+		Tenant:                    "default_tenant",
+		Database:                  "default_database",
+		RetryAttempts:             3,
+		RequestTimeout:            120 * time.Second,
+		RerankCandidateMultiplier: 3,
+		RerankMaxCandidates:       100,
+		RerankMaxDocumentBytes:    0,
+		RerankMaxRequestBytes:     0,
 	}
 
 	configPath := flags.ConfigFile
@@ -155,6 +180,9 @@ func LoadConfig(flags *FlagValues, environ []string) (Config, error) {
 	applyEnv(&cfg.EmbeddingAPIURL, "CHROMA_REPO_SEARCH_EMBEDDING_API_URL")
 	applyEnv(&cfg.EmbeddingModel, "CHROMA_REPO_SEARCH_EMBEDDING_MODEL")
 	applyEnv(&cfg.EmbeddingAPIKey, "CHROMA_REPO_SEARCH_EMBEDDING_API_KEY")
+	applyEnv(&cfg.RerankAPIURL, "CHROMA_REPO_SEARCH_RERANK_API_URL")
+	applyEnv(&cfg.RerankModel, "CHROMA_REPO_SEARCH_RERANK_MODEL")
+	applyEnv(&cfg.RerankAPIKey, "CHROMA_REPO_SEARCH_RERANK_API_KEY")
 	applyEnv(&cfg.HTTPAddr, "MCP_CHROMADB_REPO_SEARCH_HTTP")
 	if value := env["CHROMA_REPO_SEARCH_RETRY_ATTEMPTS"]; value != "" {
 		parsed, err := strconv.Atoi(value)
@@ -162,6 +190,29 @@ func LoadConfig(flags *FlagValues, environ []string) (Config, error) {
 			return Config{}, fmt.Errorf("CHROMA_REPO_SEARCH_RETRY_ATTEMPTS must be an integer")
 		}
 		cfg.RetryAttempts = parsed
+	}
+	if value := env["CHROMA_REPO_SEARCH_RERANK_CANDIDATE_MULTIPLIER"]; value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil {
+			return Config{}, fmt.Errorf("CHROMA_REPO_SEARCH_RERANK_CANDIDATE_MULTIPLIER must be an integer")
+		}
+		cfg.RerankCandidateMultiplier = parsed
+	}
+	for _, setting := range []struct {
+		name   string
+		target *int
+	}{
+		{"CHROMA_REPO_SEARCH_RERANK_MAX_CANDIDATES", &cfg.RerankMaxCandidates},
+		{"CHROMA_REPO_SEARCH_RERANK_MAX_DOCUMENT_BYTES", &cfg.RerankMaxDocumentBytes},
+		{"CHROMA_REPO_SEARCH_RERANK_MAX_REQUEST_BYTES", &cfg.RerankMaxRequestBytes},
+	} {
+		if value := env[setting.name]; value != "" {
+			parsed, err := strconv.Atoi(value)
+			if err != nil {
+				return Config{}, fmt.Errorf("%s must be an integer", setting.name)
+			}
+			*setting.target = parsed
+		}
 	}
 	if value := env["MCP_CHROMADB_REPO_SEARCH_DEBUG"]; value != "" {
 		parsed, err := strconv.ParseBool(value)
@@ -205,6 +256,27 @@ func LoadConfig(flags *FlagValues, environ []string) (Config, error) {
 	if flags.explicitlySet("embedding-api-key") {
 		cfg.EmbeddingAPIKey = flags.EmbeddingAPIKey
 	}
+	if flags.explicitlySet("rerank-api-url") {
+		cfg.RerankAPIURL = flags.RerankAPIURL
+	}
+	if flags.explicitlySet("rerank-model") {
+		cfg.RerankModel = flags.RerankModel
+	}
+	if flags.explicitlySet("rerank-api-key") {
+		cfg.RerankAPIKey = flags.RerankAPIKey
+	}
+	if flags.explicitlySet("rerank-candidate-multiplier") {
+		cfg.RerankCandidateMultiplier = flags.RerankCandidateMultiplier
+	}
+	if flags.explicitlySet("rerank-max-candidates") {
+		cfg.RerankMaxCandidates = flags.RerankMaxCandidates
+	}
+	if flags.explicitlySet("rerank-max-document-bytes") {
+		cfg.RerankMaxDocumentBytes = flags.RerankMaxDocumentBytes
+	}
+	if flags.explicitlySet("rerank-max-request-bytes") {
+		cfg.RerankMaxRequestBytes = flags.RerankMaxRequestBytes
+	}
 	if flags.explicitlySet("http") {
 		cfg.HTTPAddr = flags.HTTPAddr
 	}
@@ -217,6 +289,7 @@ func LoadConfig(flags *FlagValues, environ []string) (Config, error) {
 
 	cfg.ServerURL = strings.TrimRight(cfg.ServerURL, "/")
 	cfg.EmbeddingAPIURL = strings.TrimRight(cfg.EmbeddingAPIURL, "/")
+	cfg.RerankAPIURL = strings.TrimRight(cfg.RerankAPIURL, "/")
 	if err := validateConfig(cfg); err != nil {
 		return Config{}, err
 	}
@@ -269,6 +342,26 @@ func validateConfig(cfg Config) error {
 	}
 	if strings.TrimSpace(cfg.EmbeddingModel) == "" {
 		return errors.New("embedding-model is required")
+	}
+	if (cfg.RerankAPIURL == "") != (cfg.RerankModel == "") {
+		return errors.New("rerank-api-url and rerank-model must be configured together")
+	}
+	if cfg.RerankAPIURL != "" {
+		if err := validateOrigin("rerank-api-url", cfg.RerankAPIURL); err != nil {
+			return err
+		}
+		if cfg.RerankCandidateMultiplier < 2 {
+			return errors.New("rerank-candidate-multiplier must be at least 2 when reranking is enabled")
+		}
+		if cfg.RerankMaxCandidates < 2 {
+			return errors.New("rerank-max-candidates must be at least 2 when reranking is enabled")
+		}
+		if cfg.RerankMaxDocumentBytes < 0 {
+			return errors.New("rerank-max-document-bytes must be zero or positive")
+		}
+		if cfg.RerankMaxRequestBytes < 0 {
+			return errors.New("rerank-max-request-bytes must be zero or positive")
+		}
 	}
 	if cfg.RequestTimeout <= 0 {
 		return errors.New("request-timeout must be positive")
