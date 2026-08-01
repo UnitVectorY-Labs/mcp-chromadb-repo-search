@@ -1,0 +1,11 @@
+name: mcp-chromadb-repo-search
+default_branch: main
+config:
+  description: "An MCP server for semantically searching GitHub repository content indexed in ChromaDB."
+  license: MIT
+  language: go
+  release: release-go
+  justfile: true
+  release_github: false
+  docs:
+    enabled: false

@@ -1,0 +1,44 @@
+# .github/workflows/zizmor.yml
+name: GitHub Actions Security Analysis with zizmor 🌈
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - ".github/**"
+  pull_request:
+    branches: ["**"]
+    paths:
+      - ".github/**"
+  schedule:
+    - cron: "0 10 * * 6"
+
+jobs:
+  zizmor:
+    name: zizmor latest via Cargo
+    runs-on: arc-runner-set
+    timeout-minutes: 30
+    permissions:
+      security-events: write
+      # required for workflows in private repositories
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install the latest version of uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+
+      - name: Run zizmor 🌈
+        run: uvx zizmor --config .github/zizmor.yml --format sarif . > results.sarif
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
+
+      - name: Upload SARIF file
+        uses: github/codeql-action/upload-sarif@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0
+        with:
+          sarif_file: results.sarif
+          category: zizmor
