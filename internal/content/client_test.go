@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestClientSearch(t *testing.T) {
@@ -176,6 +177,20 @@ func TestRerankDocumentIncludesRepositoryAndFileLocation(t *testing.T) {
 	})
 	if document != "Repository: Acme/widgets@main\nFile: docs/usage.md#L30-L59\n\ncontent" {
 		t.Fatalf("reranking document = %q", document)
+	}
+}
+
+func TestTruncateRerankDocumentPreservesHeaderAndUTF8(t *testing.T) {
+	document := "Repository: Acme/widgets@main\nFile: docs/usage.md\n\n" + strings.Repeat("é", 20)
+	truncated := truncateRerankDocument(document, 20)
+	if len(truncated) > 80 {
+		t.Fatalf("truncated document is %d bytes, want at most 80", len(truncated))
+	}
+	if !strings.HasPrefix(truncated, "Repository: Acme/widgets@main\nFile: docs/usage.md\n\n") {
+		t.Fatalf("source header was not preserved: %q", truncated)
+	}
+	if !utf8.ValidString(truncated) {
+		t.Fatalf("truncated document is not valid UTF-8: %q", truncated)
 	}
 }
 

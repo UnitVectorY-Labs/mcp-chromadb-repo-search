@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 type Client struct {
@@ -130,55 +131,21 @@ func (c *Client) rerank(ctx context.Context, query string, matches []SearchMatch
 		return nil
 	}
 
-	// Build full candidate documents (header + body)
 	documents := make([]string, len(matches))
 	for i, match := range matches {
-		documents[i] = rerankDocument(match)
-	}
-
-	// Enforce per-document token limits (approximate) by truncating bodies if configured.
-	// Token estimate: bytes / 4 (heuristic); this is conservative for typical English text.
-	estimateTokens := func(s string) int { return (len(s) + 3) / 4 }
-	truncatePreservingHeader := func(doc string, maxBytes int) string {
-		// header is the part before the first blank line
-		parts := strings.SplitN(doc, "\n\n", 2)
-		header := parts[0]
-		body := ""
-		if len(parts) > 1 {
-			body = parts[1]
-		}
-		allowed := maxBytes - (len(header) + 2) // account for the two newlines
-		if allowed <= 0 {
-			// can't include body at all
-			return header + "\n\n"
-		}
-		if len(body) <= allowed {
-			return header + "\n\n" + body
-		}
-		// Trim body to allowed bytes, try to cut at a newline boundary for nicer text
-		trunc := body[:allowed]
-		if idx := strings.LastIndex(trunc, "\n"); idx > int(0.7*float32(len(trunc))) {
-			trunc = trunc[:idx]
-		}
-		return header + "\n\n" + trunc
-	}
-
-	// Apply per-document bytes and token truncation, and enforce configured max-document-bytes
-	for idx, doc := range documents {
+		document := rerankDocument(match)
 		if c.cfg.RerankMaxDocumentTokens > 0 {
-			maxBytes := c.cfg.RerankMaxDocumentTokens * 4
-			if estimateTokens(doc) > c.cfg.RerankMaxDocumentTokens {
-				doc = truncatePreservingHeader(doc, maxBytes)
-				documents[idx] = doc
-			}
+			document = truncateRerankDocument(document, c.cfg.RerankMaxDocumentTokens)
 		}
+		documents[i] = document
+	}
+
+	for idx, doc := range documents {
 		if c.cfg.RerankMaxDocumentBytes > 0 && len(doc) > c.cfg.RerankMaxDocumentBytes {
-			// bytes limit enforced after token truncation
 			return fmt.Errorf("reranking document %d is %d bytes, exceeding rerank-max-document-bytes of %d", idx, len(doc), c.cfg.RerankMaxDocumentBytes)
 		}
 	}
 
-	// Enforce total request bytes limit as before
 	requestBytes := 0
 	for _, doc := range documents {
 		requestBytes += len(doc)
@@ -186,68 +153,6 @@ func (c *Client) rerank(ctx context.Context, query string, matches []SearchMatch
 			return fmt.Errorf("reranking request is %d bytes, exceeding rerank-max-request-bytes of %d", requestBytes, c.cfg.RerankMaxRequestBytes)
 		}
 	}
-
-	// If a total token cap is configured, attempt to reduce total estimated tokens by truncating largest docs.
-	if c.cfg.RerankMaxRequestTokens > 0 {
-		totalTokens := 0
-		tokens := make([]int, len(documents))
-		for i, doc := range documents {
-			t := estimateTokens(doc)
-			tokens[i] = t
-			totalTokens += t
-		}
-		if totalTokens > c.cfg.RerankMaxRequestTokens {
-			// Greedy truncate: reduce the largest document repeatedly until under limit.
-			for loop := 0; loop < 1000 && totalTokens > c.cfg.RerankMaxRequestTokens; loop++ {
-				// find largest token doc
-				maxIdx := 0
-				for i := 1; i < len(tokens); i++ {
-					if tokens[i] > tokens[maxIdx] {
-						maxIdx = i
-					}
-				}
-				if tokens[maxIdx] <= 1 {
-					break
-				}
-				// compute target reduction
-				reduceBy := totalTokens - c.cfg.RerankMaxRequestTokens
-				// don't reduce more than half of this document in one pass
-				reduce := reduceBy
-				maxReduce := tokens[maxIdx] / 2
-				if reduce > maxReduce {
-					reduce = maxReduce
-				}
-				if reduce <= 0 {
-					reduce = 1
-				}
-				newTokens := tokens[maxIdx] - reduce
-				// translate tokens to bytes budget
-				newBytes := newTokens * 4
-				documents[maxIdx] = truncatePreservingHeader(documents[maxIdx], newBytes)
-				old := tokens[maxIdx]
-				tokens[maxIdx] = estimateTokens(documents[maxIdx])
-				totalTokens -= old - tokens[maxIdx]
-			}
-			if totalTokens > c.cfg.RerankMaxRequestTokens {
-				// As a fallback, forcefully reduce the candidate set to fit the token budget by trimming the tail.
-				trimmed := []string{}
-				tTrimTokens := 0
-				for i := 0; i < len(documents); i++ {
-					if tTrimTokens+tokens[i] > c.cfg.RerankMaxRequestTokens {
-						break
-					}
-					trimmed = append(trimmed, documents[i])
-					tTrimTokens += tokens[i]
-				}
-				documents = trimmed
-				// reflect reduced matches as well
-				if len(documents) < len(matches) {
-					matches = matches[:len(documents)]
-				}
-			}
-		}
-	}
-
 	payload := rerankRequest{Model: c.cfg.RerankModel, Query: query, Documents: documents}
 	var response rerankResponse
 	if err := c.doJSON(ctx, "reranking request", c.cfg.RerankAPIURL+"/v1/rerank", payload, bearer(c.cfg.RerankAPIKey), &response); err != nil {
@@ -271,6 +176,34 @@ func (c *Client) rerank(ctx context.Context, query string, matches []SearchMatch
 	}
 	sort.SliceStable(matches, func(i, j int) bool { return matches[i].rerankScore > matches[j].rerankScore })
 	return nil
+}
+
+const estimatedBytesPerToken = 4
+
+// truncateRerankDocument bounds a complete reranking document using the same
+// inexpensive approximation used by configuration: four UTF-8 bytes per token.
+// The source header is retained whenever it fits in the configured budget.
+func truncateRerankDocument(document string, maxTokens int) string {
+	maxBytes := maxTokens * estimatedBytesPerToken
+	if maxBytes <= 0 || len(document) <= maxBytes {
+		return document
+	}
+
+	header, body, found := strings.Cut(document, "\n\n")
+	if !found || len(header)+2 > maxBytes {
+		return truncateUTF8(document, maxBytes)
+	}
+	return header + "\n\n" + truncateUTF8(body, maxBytes-len(header)-2)
+}
+
+func truncateUTF8(value string, maxBytes int) string {
+	if len(value) <= maxBytes {
+		return value
+	}
+	for maxBytes > 0 && !utf8.RuneStart(value[maxBytes]) {
+		maxBytes--
+	}
+	return value[:maxBytes]
 }
 
 func rerankDocument(match SearchMatch) string {

@@ -65,8 +65,31 @@ func TestLoadConfigEnablesRerankingFromEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.RerankAPIURL != "https://rerank.example.com" || cfg.RerankModel != "qwen3-reranker-4b-q6k" || cfg.RerankCandidateMultiplier != 4 || cfg.RerankMaxCandidates != 100 || cfg.RerankMaxDocumentBytes != 0 || cfg.RerankMaxRequestBytes != 0 {
+	if cfg.RerankAPIURL != "https://rerank.example.com" || cfg.RerankModel != "qwen3-reranker-4b-q6k" || cfg.RerankCandidateMultiplier != 4 || cfg.RerankMaxCandidates != 100 || cfg.RerankMaxDocumentBytes != 0 || cfg.RerankMaxRequestBytes != 0 || cfg.RerankMaxDocumentTokens != 512 {
 		t.Fatalf("unexpected reranking config: %+v", cfg)
+	}
+}
+
+func TestLoadConfigAllowsRerankingTokenLimitOverrides(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	flags := NewFlagSet(fs)
+	if err := fs.Parse([]string{
+		"--server-url", "https://chroma.example.com",
+		"--collection-name", "repository-content",
+		"--embedding-api-url", "https://embeddings.example.com",
+		"--embedding-model", "embedding-model",
+		"--rerank-api-url", "https://rerank.example.com",
+		"--rerank-model", "reranker",
+		"--rerank-max-document-tokens", "384",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(flags, []string{"CHROMA_REPO_SEARCH_RERANK_MAX_DOCUMENT_TOKENS=256"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RerankMaxDocumentTokens != 384 {
+		t.Fatalf("unexpected token limits: %+v", cfg)
 	}
 }
 

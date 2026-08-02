@@ -150,15 +150,17 @@ Precedence is command-line flags, environment variables, explicitly selected YAM
 | `--rerank-max-candidates` | `CHROMA_REPO_SEARCH_RERANK_MAX_CANDIDATES` | `100` |
 | `--rerank-max-document-bytes` | `CHROMA_REPO_SEARCH_RERANK_MAX_DOCUMENT_BYTES` | `0` (unlimited) |
 | `--rerank-max-request-bytes` | `CHROMA_REPO_SEARCH_RERANK_MAX_REQUEST_BYTES` | `0` (unlimited) |
+| `--rerank-max-document-tokens` | `CHROMA_REPO_SEARCH_RERANK_MAX_DOCUMENT_TOKENS` | `512` (approximate; includes the source header) |
 | `--http` | `MCP_CHROMADB_REPO_SEARCH_HTTP` | empty (stdio) |
 | `--debug` | `MCP_CHROMADB_REPO_SEARCH_DEBUG` | `false` |
 | `--request-timeout` | `MCP_CHROMADB_REPO_SEARCH_REQUEST_TIMEOUT` | `120s` |
+| `--version` | — | `false` |
 
 Reranking is opt-in: set both `--rerank-api-url` and `--rerank-model` (or their environment variables). The server calls `POST /v1/rerank` with the query and retrieved candidate text, then returns only the requested `limit`; its candidate multiplier must be at least `2`.
 
-The reranker receives a `Repository: owner/repository@branch` and `File: path#Lstart-Lend` header before every candidate body. Every selected Chroma record is sent in full: the companion indexer stores complete chunks (512 tokens by default), not complete source files. Candidate retrieval is `min(limit × multiplier, max-candidates)`, so the default is 30 candidates for `limit: 10` and the 100-candidate setting is a ceiling, not an always-on target.
+The reranker receives a `Repository: owner/repository@branch` and `File: path#Lstart-Lend` header before every candidate body. The companion indexer stores complete chunks (512 tokens by default), not complete source files. That header can push a 512-token chunk over a reranker that has a physical 512-token input batch limit, so this server defaults `rerank-max-document-tokens` to `512` and truncates the candidate body as needed before sending it. The limit is approximate (using four bytes per token); adjust it with `--rerank-max-document-tokens` or `CHROMA_REPO_SEARCH_RERANK_MAX_DOCUMENT_TOKENS` if the deployed reranker uses a different limit. Set it to `0` to disable this protection. Candidate retrieval is `min(limit × multiplier, max-candidates)`, so the default is 30 candidates for `limit: 10` and the 100-candidate setting is a ceiling, not an always-on target.
 
-Models and endpoints have different context and request limits. Set either byte limit when the deployed reranker requires one; zero leaves it unlimited. If a configured limit would be exceeded, search returns an explicit error rather than silently truncating a chunk and changing its relevance score. Tune `rerank-max-candidates`, `rerank-max-document-bytes`, and `rerank-max-request-bytes` together for the deployed model.
+Models and endpoints have different context and request limits. The byte limits remain available when an endpoint specifies byte-based limits. A positive token limit truncates candidate bodies to fit; a positive byte limit rejects an oversized request. Tune `rerank-max-candidates`, `rerank-max-document-tokens`, `rerank-max-document-bytes`, and `rerank-max-request-bytes` together for the deployed model.
 
 `--version` prints the build and Go runtime version. Tokens may be supplied with or without the `Bearer ` prefix. Secrets are never logged; debug output reports operations and endpoints only.
 
