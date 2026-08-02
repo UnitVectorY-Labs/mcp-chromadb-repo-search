@@ -33,6 +33,9 @@ type Config struct {
 	RerankMaxCandidates       int
 	RerankMaxDocumentBytes    int
 	RerankMaxRequestBytes     int
+	// token-based limits (approximate token accounting)
+	RerankMaxDocumentTokens   int
+	RerankMaxRequestTokens    int
 	HTTPAddr                  string
 	Debug                     bool
 	RequestTimeout            time.Duration
@@ -57,6 +60,9 @@ type FlagValues struct {
 	RerankMaxCandidates       int
 	RerankMaxDocumentBytes    int
 	RerankMaxRequestBytes     int
+	// token-based limits (approximate token accounting)
+	RerankMaxDocumentTokens   int
+	RerankMaxRequestTokens    int
 	HTTPAddr                  string
 	Debug                     bool
 	RequestTimeout            time.Duration
@@ -82,6 +88,8 @@ func NewFlagSet(fs *flag.FlagSet) *FlagValues {
 	fs.IntVar(&v.RerankMaxCandidates, "rerank-max-candidates", 0, "maximum candidates sent to the reranker")
 	fs.IntVar(&v.RerankMaxDocumentBytes, "rerank-max-document-bytes", 0, "maximum UTF-8 bytes sent for one reranking document, including its source header")
 	fs.IntVar(&v.RerankMaxRequestBytes, "rerank-max-request-bytes", 0, "maximum UTF-8 bytes in the reranking request documents")
+	fs.IntVar(&v.RerankMaxDocumentTokens, "rerank-max-document-tokens", 0, "maximum tokens estimated for one reranking document (approximate)")
+	fs.IntVar(&v.RerankMaxRequestTokens, "rerank-max-request-tokens", 0, "maximum total tokens estimated for the reranking request (approximate)")
 	fs.StringVar(&v.HTTPAddr, "http", "", "run Streamable HTTP on an address or port (defaults to stdio)")
 	fs.BoolVar(&v.Debug, "debug", false, "enable debug logging to stderr")
 	fs.DurationVar(&v.RequestTimeout, "request-timeout", 0, "timeout for each backend request")
@@ -135,6 +143,8 @@ func LoadConfig(flags *FlagValues, environ []string) (Config, error) {
 		RerankMaxCandidates:       100,
 		RerankMaxDocumentBytes:    0,
 		RerankMaxRequestBytes:     0,
+		RerankMaxDocumentTokens:   0,
+		RerankMaxRequestTokens:    0,
 	}
 
 	configPath := flags.ConfigFile
@@ -205,6 +215,8 @@ func LoadConfig(flags *FlagValues, environ []string) (Config, error) {
 		{"CHROMA_REPO_SEARCH_RERANK_MAX_CANDIDATES", &cfg.RerankMaxCandidates},
 		{"CHROMA_REPO_SEARCH_RERANK_MAX_DOCUMENT_BYTES", &cfg.RerankMaxDocumentBytes},
 		{"CHROMA_REPO_SEARCH_RERANK_MAX_REQUEST_BYTES", &cfg.RerankMaxRequestBytes},
+		{"CHROMA_REPO_SEARCH_RERANK_MAX_DOCUMENT_TOKENS", &cfg.RerankMaxDocumentTokens},
+		{"CHROMA_REPO_SEARCH_RERANK_MAX_REQUEST_TOKENS", &cfg.RerankMaxRequestTokens},
 	} {
 		if value := env[setting.name]; value != "" {
 			parsed, err := strconv.Atoi(value)
@@ -276,6 +288,12 @@ func LoadConfig(flags *FlagValues, environ []string) (Config, error) {
 	}
 	if flags.explicitlySet("rerank-max-request-bytes") {
 		cfg.RerankMaxRequestBytes = flags.RerankMaxRequestBytes
+	}
+	if flags.explicitlySet("rerank-max-document-tokens") {
+		cfg.RerankMaxDocumentTokens = flags.RerankMaxDocumentTokens
+	}
+	if flags.explicitlySet("rerank-max-request-tokens") {
+		cfg.RerankMaxRequestTokens = flags.RerankMaxRequestTokens
 	}
 	if flags.explicitlySet("http") {
 		cfg.HTTPAddr = flags.HTTPAddr
@@ -361,6 +379,12 @@ func validateConfig(cfg Config) error {
 		}
 		if cfg.RerankMaxRequestBytes < 0 {
 			return errors.New("rerank-max-request-bytes must be zero or positive")
+		}
+		if cfg.RerankMaxDocumentTokens < 0 {
+			return errors.New("rerank-max-document-tokens must be zero or positive")
+		}
+		if cfg.RerankMaxRequestTokens < 0 {
+			return errors.New("rerank-max-request-tokens must be zero or positive")
 		}
 	}
 	if cfg.RequestTimeout <= 0 {
