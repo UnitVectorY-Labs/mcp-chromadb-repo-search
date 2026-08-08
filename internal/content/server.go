@@ -102,7 +102,7 @@ func Serve(srv *mcp.Server, cfg Config) error {
 	addr := normalizeHTTPAddr(cfg.HTTPAddr)
 	stream := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
 		return srv
-	}, nil)
+	}, &mcp.StreamableHTTPOptions{Stateless: true})
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", withAuthorizationContext(stream))
 	if cfg.Debug {
