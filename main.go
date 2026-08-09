@@ -45,7 +45,12 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	if cfg.Debug {
+	if cfg.HTTPAddr != "" {
+		// HTTP request events are newline-delimited JSON on stdout. Do not add
+		// the standard logger's timestamp prefix, which would make them invalid JSON.
+		log.SetOutput(os.Stdout)
+		log.SetFlags(0)
+	} else if cfg.Debug {
 		log.SetOutput(os.Stderr)
 		log.Println("Debug mode enabled.")
 	} else {

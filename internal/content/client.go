@@ -251,7 +251,7 @@ func (c *Client) doJSON(ctx context.Context, operation, endpoint string, payload
 		if authorization != "" {
 			req.Header.Set("Authorization", authorization)
 		}
-		if c.cfg.Debug {
+		if c.cfg.Debug && c.cfg.HTTPAddr == "" {
 			log.Printf("%s: %s %s (attempt %d)", operation, method, endpoint, attempt)
 		}
 		resp, requestErr := c.http.Do(req)
