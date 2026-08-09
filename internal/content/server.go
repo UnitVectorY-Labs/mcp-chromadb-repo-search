@@ -2,6 +2,7 @@ package content
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -17,6 +18,63 @@ import (
 )
 
 type authContextKey struct{}
+type requestLogContextKey struct{}
+
+// requestLogFields carries tool-specific details from the MCP handler to the
+// HTTP middleware that writes the single request-completion event.
+type requestLogFields struct {
+	Tool                 string `json:"tool,omitempty"`
+	Parameters           any    `json:"parameters,omitempty"`
+	Outcome              string `json:"outcome,omitempty"`
+	Error                string `json:"error,omitempty"`
+	ResponseContentBytes int    `json:"response_content_bytes,omitempty"`
+	DocumentsFound       *int   `json:"documents_found,omitempty"`
+}
+
+type requestLogEvent struct {
+	Timestamp  time.Time         `json:"timestamp"`
+	Level      string            `json:"level"`
+	Event      string            `json:"event"`
+	RequestID  string            `json:"request_id"`
+	Transport  string            `json:"transport"`
+	DurationMS int64             `json:"duration_ms"`
+	HTTP       httpLogFields     `json:"http"`
+	MCP        *requestLogFields `json:"mcp,omitempty"`
+}
+
+type httpLogFields struct {
+	Method        string `json:"method"`
+	Path          string `json:"path"`
+	StatusCode    int    `json:"status_code"`
+	ResponseBytes int    `json:"response_bytes"`
+}
+
+type loggingResponseWriter struct {
+	http.ResponseWriter
+	statusCode    int
+	responseBytes int
+}
+
+func (w *loggingResponseWriter) WriteHeader(statusCode int) {
+	w.statusCode = statusCode
+	w.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (w *loggingResponseWriter) Write(data []byte) (int, error) {
+	if w.statusCode == 0 {
+		w.statusCode = http.StatusOK
+	}
+	n, err := w.ResponseWriter.Write(data)
+	w.responseBytes += n
+	return n, err
+}
+
+func (w *loggingResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func requestLogFromContext(ctx context.Context) *requestLogFields {
+	fields, _ := ctx.Value(requestLogContextKey{}).(*requestLogFields)
+	return fields
+}
 
 type searchInput struct {
 	Query  string `json:"query" jsonschema:"A focused natural-language search query. Include exact identifiers, filenames, or error text when known; semantic matching also finds related wording."`
@@ -46,43 +104,67 @@ func CreateMCPServer(cfg Config, version string) *mcp.Server {
 		if limit == 0 {
 			limit = defaultSearchLimit
 		}
+		requestLog := requestLogFromContext(ctx)
+		if requestLog != nil {
+			requestLog.Tool = "search"
+			requestLog.Parameters = searchInput{Query: query, Source: source, Path: path, Limit: limit}
+		}
 		if query == "" {
-			return toolError("query must be non-empty"), nil, nil
+			message := "query must be non-empty"
+			setToolError(requestLog, message)
+			return toolError(message), nil, nil
 		}
 		if limit < 1 || limit > maximumSearchLimit {
-			return toolError(fmt.Sprintf("limit must be between 1 and %d", maximumSearchLimit)), nil, nil
+			message := fmt.Sprintf("limit must be between 1 and %d", maximumSearchLimit)
+			setToolError(requestLog, message)
+			return toolError(message), nil, nil
 		}
 		organization, repository, branch, err := parseSource(source)
 		if err != nil {
+			setToolError(requestLog, err.Error())
 			return toolError(err.Error()), nil, nil
 		}
 		if _, err := pathDocumentWhere(path); err != nil {
+			setToolError(requestLog, err.Error())
 			return toolError(err.Error()), nil, nil
 		}
 		params := SearchParams{Query: query, Limit: limit, Organization: organization, Repository: repository, Branch: branch, Path: path}
-		requestID := uuid.NewString()
-		started := time.Now()
-		if cfg.Debug {
-			log.Printf("repository search started: request_id=%s source=%q path=%q limit=%d", requestID, source, path, limit)
-		}
 		auth, _ := ctx.Value(authContextKey{}).(string)
 		matches, err := client.Search(ctx, auth, params)
 		if err != nil {
-			if cfg.Debug {
-				log.Printf("repository search failed: request_id=%s duration=%s error=%v", requestID, time.Since(started), err)
+			message := fmt.Sprintf("repository content search failed: %v", err)
+			// The client error can include a backend response body. Keep that out
+			// of request logs while retaining the size of the tool response.
+			if requestLog != nil {
+				requestLog.Outcome = "error"
+				requestLog.Error = "repository content search failed"
+				requestLog.ResponseContentBytes = len(message)
 			}
-			return toolError(fmt.Sprintf("repository content search failed: %v", err)), nil, nil
+			return toolError(message), nil, nil
 		}
-		if cfg.Debug {
-			log.Printf("repository search completed: request_id=%s duration=%s results=%d", requestID, time.Since(started), len(matches))
+		response := renderSearchResults(matches, source)
+		if requestLog != nil {
+			documentCount := len(matches)
+			requestLog.Outcome = "success"
+			requestLog.ResponseContentBytes = len(response)
+			requestLog.DocumentsFound = &documentCount
 		}
-		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: renderSearchResults(matches, source)}}}, nil, nil
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: response}}}, nil, nil
 	})
 	return srv
 }
 
 func toolError(message string) *mcp.CallToolResult {
 	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: message}}, IsError: true}
+}
+
+func setToolError(requestLog *requestLogFields, message string) {
+	if requestLog == nil {
+		return
+	}
+	requestLog.Outcome = "error"
+	requestLog.Error = message
+	requestLog.ResponseContentBytes = len(message)
 }
 
 func boolPtr(value bool) *bool {
@@ -100,18 +182,19 @@ func Serve(srv *mcp.Server, cfg Config) error {
 		return nil
 	}
 	addr := normalizeHTTPAddr(cfg.HTTPAddr)
+	if err := http.ListenAndServe(addr, newHTTPHandler(srv)); err != nil {
+		return fmt.Errorf("Streamable HTTP server error: %w", err)
+	}
+	return nil
+}
+
+func newHTTPHandler(srv *mcp.Server) http.Handler {
 	stream := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
 		return srv
 	}, &mcp.StreamableHTTPOptions{Stateless: true})
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", withAuthorizationContext(stream))
-	if cfg.Debug {
-		log.Printf("Streamable HTTP endpoint: http://%s/mcp", addr)
-	}
-	if err := http.ListenAndServe(addr, mux); err != nil {
-		return fmt.Errorf("Streamable HTTP server error: %w", err)
-	}
-	return nil
+	return withRequestLogging(mux)
 }
 
 func withAuthorizationContext(next http.Handler) http.Handler {
@@ -120,6 +203,44 @@ func withAuthorizationContext(next http.Handler) http.Handler {
 			r = r.WithContext(context.WithValue(r.Context(), authContextKey{}, authorization))
 		}
 		next.ServeHTTP(w, r)
+	})
+}
+
+func withRequestLogging(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started := time.Now()
+		mcpFields := &requestLogFields{}
+		r = r.WithContext(context.WithValue(r.Context(), requestLogContextKey{}, mcpFields))
+		response := &loggingResponseWriter{ResponseWriter: w}
+		next.ServeHTTP(response, r)
+		statusCode := response.statusCode
+		if statusCode == 0 {
+			statusCode = http.StatusOK
+		}
+		var mcpLog *requestLogFields
+		if mcpFields.Tool != "" {
+			mcpLog = mcpFields
+		}
+		level := "INFO"
+		if statusCode >= http.StatusBadRequest || (mcpLog != nil && mcpLog.Outcome == "error") {
+			level = "ERROR"
+		}
+		completed := time.Now()
+		event := requestLogEvent{
+			Timestamp:  completed.UTC(),
+			Level:      level,
+			Event:      "mcp.request.completed",
+			RequestID:  uuid.NewString(),
+			Transport:  "streamable_http",
+			DurationMS: completed.Sub(started).Milliseconds(),
+			HTTP: httpLogFields{
+				Method: r.Method, Path: r.URL.Path, StatusCode: statusCode, ResponseBytes: response.responseBytes,
+			},
+			MCP: mcpLog,
+		}
+		if data, err := json.Marshal(event); err == nil {
+			log.Print(string(data))
+		}
 	})
 }
 
