@@ -9,4 +9,5 @@ config:
   status: active
   release_github: true  
   docs:
-    enabled: false
+    enabled: true
+    domain: mcp-chromadb-repo-search.unitvectorylabs.com
