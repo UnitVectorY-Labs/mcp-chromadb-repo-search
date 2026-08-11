@@ -26,6 +26,14 @@ func versionString() string {
 	return fmt.Sprintf("mcp-chromadb-repo-search version %s (%s, %s/%s)", version, runtime.Version(), runtime.GOOS, runtime.GOARCH)
 }
 
+func userAgent() string {
+	version := strings.TrimPrefix(Version, "v")
+	if version == "" {
+		version = "dev"
+	}
+	return "mcp-chromadb-repo-search/" + version
+}
+
 func main() {
 	if Version == "dev" || Version == "" {
 		if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
@@ -45,6 +53,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+	cfg.UserAgent = userAgent()
 	if cfg.HTTPAddr != "" {
 		// HTTP request events are newline-delimited JSON on stdout. Do not add
 		// the standard logger's timestamp prefix, which would make them invalid JSON.

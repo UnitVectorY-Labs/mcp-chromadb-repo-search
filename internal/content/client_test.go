@@ -12,9 +12,13 @@ import (
 )
 
 func TestClientSearch(t *testing.T) {
+	const userAgent = "mcp-chromadb-repo-search/1.2.3"
 	var queryPayload queryRequest
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/embeddings", func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("User-Agent"); got != userAgent {
+			t.Errorf("embedding User-Agent = %q, want %q", got, userAgent)
+		}
 		if got := r.Header.Get("Authorization"); got != "Bearer embed-secret" {
 			t.Errorf("embedding authorization = %q", got)
 		}
@@ -29,12 +33,18 @@ func TestClientSearch(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"index": 0, "embedding": []float32{0.1, 0.2}}}})
 	})
 	mux.HandleFunc("/api/v2/tenants/tenant/databases/database/collections/repository-content", func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("User-Agent"); got != userAgent {
+			t.Errorf("Chroma collection User-Agent = %q, want %q", got, userAgent)
+		}
 		if got := r.Header.Get("Authorization"); got != "Bearer chroma-secret" {
 			t.Errorf("Chroma authorization = %q", got)
 		}
 		_ = json.NewEncoder(w).Encode(Collection{ID: "collection-id", Name: "repository-content"})
 	})
 	mux.HandleFunc("/api/v2/tenants/tenant/databases/database/collections/collection-id/query", func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("User-Agent"); got != userAgent {
+			t.Errorf("Chroma query User-Agent = %q, want %q", got, userAgent)
+		}
 		_ = json.NewDecoder(r.Body).Decode(&queryPayload)
 		distance := 0.25
 		document := "Source: Acme/widgets@main:config.go\n\nconfiguration"
@@ -48,6 +58,7 @@ func TestClientSearch(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(Config{
+		UserAgent: userAgent,
 		ServerURL: server.URL, CollectionName: "repository-content", BearerToken: "chroma-secret",
 		Tenant: "tenant", Database: "database", RetryAttempts: 1, EmbeddingAPIURL: server.URL,
 		EmbeddingModel: "model", EmbeddingAPIKey: "embed-secret", RequestTimeout: time.Second,
@@ -80,6 +91,7 @@ func TestClientSearch(t *testing.T) {
 }
 
 func TestClientSearchReranksCandidatesBeforeLimiting(t *testing.T) {
+	const userAgent = "mcp-chromadb-repo-search/1.2.3"
 	var queryPayload queryRequest
 	var rerankPayload rerankRequest
 	mux := http.NewServeMux()
@@ -101,6 +113,9 @@ func TestClientSearchReranksCandidatesBeforeLimiting(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(queryResponse{IDs: [][]string{{"0", "1", "2", "3", "4", "5"}}, Documents: [][]*string{documents}, Metadatas: [][]map[string]any{metadata}})
 	})
 	mux.HandleFunc("/v1/rerank", func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("User-Agent"); got != userAgent {
+			t.Errorf("reranking User-Agent = %q, want %q", got, userAgent)
+		}
 		if got := r.Header.Get("Authorization"); got != "Bearer rerank-secret" {
 			t.Errorf("reranking authorization = %q", got)
 		}
@@ -117,6 +132,7 @@ func TestClientSearchReranksCandidatesBeforeLimiting(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(Config{
+		UserAgent: userAgent,
 		ServerURL: server.URL, CollectionName: "repository-content", Tenant: "tenant", Database: "database", RetryAttempts: 1,
 		EmbeddingAPIURL: server.URL, EmbeddingModel: "embedding-model", RequestTimeout: time.Second,
 		RerankAPIURL: server.URL, RerankModel: "reranker", RerankAPIKey: "rerank-secret", RerankCandidateMultiplier: 3,
