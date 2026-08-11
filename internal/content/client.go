@@ -61,6 +61,9 @@ type rerankResponse struct {
 }
 
 func NewClient(cfg Config) *Client {
+	if cfg.UserAgent == "" {
+		cfg.UserAgent = "mcp-chromadb-repo-search/dev"
+	}
 	return &Client{cfg: cfg, http: &http.Client{Timeout: cfg.RequestTimeout}}
 }
 
@@ -251,6 +254,7 @@ func (c *Client) doJSON(ctx context.Context, operation, endpoint string, payload
 		if authorization != "" {
 			req.Header.Set("Authorization", authorization)
 		}
+		req.Header.Set("User-Agent", c.cfg.UserAgent)
 		if c.cfg.Debug && c.cfg.HTTPAddr == "" {
 			log.Printf("%s: %s %s (attempt %d)", operation, method, endpoint, attempt)
 		}

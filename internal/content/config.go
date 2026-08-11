@@ -17,6 +17,9 @@ import (
 var collectionNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{1,510}[A-Za-z0-9]$`)
 
 type Config struct {
+	// UserAgent identifies this application to its ChromaDB, embedding, and
+	// reranking backends. It is populated by the executable, not user config.
+	UserAgent                 string
 	ServerURL                 string
 	CollectionName            string
 	BearerToken               string
