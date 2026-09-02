@@ -1,6 +1,6 @@
 module github.com/UnitVectorY-Labs/mcp-chromadb-repo-search
 
-go 1.26.0 // GOVERSION
+go 1.27.0 // GOVERSION
 
 require (
 	github.com/google/uuid v1.6.0
