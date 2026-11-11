@@ -2,7 +2,7 @@ package content
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/v2"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -26,11 +26,11 @@ func TestClientSearch(t *testing.T) {
 			Model string   `json:"model"`
 			Input []string `json:"input"`
 		}
-		_ = json.NewDecoder(r.Body).Decode(&payload)
+		_ = json.UnmarshalRead(r.Body, &payload)
 		if payload.Model != "model" || !reflect.DeepEqual(payload.Input, []string{"query: find configuration"}) {
 			t.Errorf("unexpected embedding payload: %+v", payload)
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"index": 0, "embedding": []float32{0.1, 0.2}}}})
+		_ = json.MarshalWrite(w, map[string]any{"data": []any{map[string]any{"index": 0, "embedding": []float32{0.1, 0.2}}}})
 	})
 	mux.HandleFunc("/api/v2/tenants/tenant/databases/database/collections/repository-content", func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("User-Agent"); got != userAgent {
@@ -39,16 +39,16 @@ func TestClientSearch(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer chroma-secret" {
 			t.Errorf("Chroma authorization = %q", got)
 		}
-		_ = json.NewEncoder(w).Encode(Collection{ID: "collection-id", Name: "repository-content"})
+		_ = json.MarshalWrite(w, Collection{ID: "collection-id", Name: "repository-content"})
 	})
 	mux.HandleFunc("/api/v2/tenants/tenant/databases/database/collections/collection-id/query", func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("User-Agent"); got != userAgent {
 			t.Errorf("Chroma query User-Agent = %q, want %q", got, userAgent)
 		}
-		_ = json.NewDecoder(r.Body).Decode(&queryPayload)
+		_ = json.UnmarshalRead(r.Body, &queryPayload)
 		distance := 0.25
 		document := "Source: Acme/widgets@main:config.go\n\nconfiguration"
-		_ = json.NewEncoder(w).Encode(queryResponse{
+		_ = json.MarshalWrite(w, queryResponse{
 			IDs: [][]string{{"record-id"}}, Documents: [][]*string{{&document}},
 			Metadatas: [][]map[string]any{{{"organization": "Acme", "repository": "widgets"}}},
 			Distances: [][]*float64{{&distance}},
@@ -96,13 +96,13 @@ func TestClientSearchReranksCandidatesBeforeLimiting(t *testing.T) {
 	var rerankPayload rerankRequest
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/embeddings", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"index": 0, "embedding": []float32{0.1}}}})
+		_ = json.MarshalWrite(w, map[string]any{"data": []any{map[string]any{"index": 0, "embedding": []float32{0.1}}}})
 	})
 	mux.HandleFunc("/api/v2/tenants/tenant/databases/database/collections/repository-content", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(Collection{ID: "collection-id"})
+		_ = json.MarshalWrite(w, Collection{ID: "collection-id"})
 	})
 	mux.HandleFunc("/api/v2/tenants/tenant/databases/database/collections/collection-id/query", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewDecoder(r.Body).Decode(&queryPayload)
+		_ = json.UnmarshalRead(r.Body, &queryPayload)
 		documents := make([]*string, 6)
 		metadata := make([]map[string]any, 6)
 		for index := range documents {
@@ -110,7 +110,7 @@ func TestClientSearchReranksCandidatesBeforeLimiting(t *testing.T) {
 			documents[index] = &document
 			metadata[index] = map[string]any{"organization": "Acme", "repository": "widgets", "branch": "main", "path": "file" + string(rune('a'+index)) + ".go"}
 		}
-		_ = json.NewEncoder(w).Encode(queryResponse{IDs: [][]string{{"0", "1", "2", "3", "4", "5"}}, Documents: [][]*string{documents}, Metadatas: [][]map[string]any{metadata}})
+		_ = json.MarshalWrite(w, queryResponse{IDs: [][]string{{"0", "1", "2", "3", "4", "5"}}, Documents: [][]*string{documents}, Metadatas: [][]map[string]any{metadata}})
 	})
 	mux.HandleFunc("/v1/rerank", func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("User-Agent"); got != userAgent {
@@ -119,8 +119,8 @@ func TestClientSearchReranksCandidatesBeforeLimiting(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer rerank-secret" {
 			t.Errorf("reranking authorization = %q", got)
 		}
-		_ = json.NewDecoder(r.Body).Decode(&rerankPayload)
-		_ = json.NewEncoder(w).Encode(rerankResponse{Results: []struct {
+		_ = json.UnmarshalRead(r.Body, &rerankPayload)
+		_ = json.MarshalWrite(w, rerankResponse{Results: []struct {
 			Index          int     `json:"index"`
 			RelevanceScore float64 `json:"relevance_score"`
 		}{
@@ -204,5 +204,52 @@ func TestRerankRejectsConfiguredLimitWithoutTruncating(t *testing.T) {
 	err := client.rerank(context.Background(), "query", matches)
 	if err == nil || !strings.Contains(err.Error(), "rerank-max-document-bytes") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestClientRejectsAmbiguousJSONResponses(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		body      string
+		wantID    string
+		wantError bool
+	}{
+		{"valid", `{"id":"correct"}`, "correct", false},
+		{"duplicate name", `{"id":"first","id":"second"}`, "", true},
+		{"invalid UTF-8", "{\"id\":\"\xff\"}", "", true},
+		{"case-sensitive field", `{"ID":"wrong"}`, "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+			client := NewClient(Config{RetryAttempts: 1, RequestTimeout: time.Second})
+			var result Collection
+			err := client.doJSON(context.Background(), "lookup", server.URL, nil, "", &result)
+			if (err != nil) != tc.wantError {
+				t.Fatalf("error = %v, want error %v", err, tc.wantError)
+			}
+			if !tc.wantError && result.ID != tc.wantID {
+				t.Fatalf("id = %q, want %q", result.ID, tc.wantID)
+			}
+		})
+	}
+}
+
+func TestQueryRequestOmitsEmptyFilters(t *testing.T) {
+	data, err := json.Marshal(queryRequest{QueryEmbeddings: [][]float32{{0.5}}, NResults: 1, Include: []string{"documents"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fields["where"]; ok {
+		t.Fatalf("unexpected where filter: %s", data)
+	}
+	if _, ok := fields["where_document"]; ok {
+		t.Fatalf("unexpected where_document filter: %s", data)
 	}
 }

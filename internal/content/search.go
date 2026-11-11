@@ -1,7 +1,6 @@
 package content
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"regexp"
@@ -264,9 +263,6 @@ func metadataInt(metadata map[string]any, key string) int {
 		return int(value)
 	case int:
 		return value
-	case json.Number:
-		parsed, _ := strconv.Atoi(string(value))
-		return parsed
 	}
 	return 0
 }
