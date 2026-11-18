@@ -2,7 +2,7 @@ package content
 
 import (
 	"bytes"
-	"encoding/json"
+	"encoding/json/v2"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -13,14 +13,14 @@ import (
 func TestHTTPRequestLogging(t *testing.T) {
 	backend := http.NewServeMux()
 	backend.HandleFunc("/v1/embeddings", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"index": 0, "embedding": []float32{0.1}}}})
+		_ = json.MarshalWrite(w, map[string]any{"data": []any{map[string]any{"index": 0, "embedding": []float32{0.1}}}})
 	})
 	backend.HandleFunc("/api/v2/tenants/tenant/databases/database/collections/repository-content", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(Collection{ID: "collection-id", Name: "repository-content"})
+		_ = json.MarshalWrite(w, Collection{ID: "collection-id", Name: "repository-content"})
 	})
 	backend.HandleFunc("/api/v2/tenants/tenant/databases/database/collections/collection-id/query", func(w http.ResponseWriter, r *http.Request) {
 		document := "Source: Acme/widgets@main:config.go\n\nconfiguration"
-		_ = json.NewEncoder(w).Encode(queryResponse{
+		_ = json.MarshalWrite(w, queryResponse{
 			IDs:       [][]string{{"record-id"}},
 			Documents: [][]*string{{&document}},
 			Metadatas: [][]map[string]any{{{"organization": "Acme", "repository": "widgets", "branch": "main", "path": "config.go"}}},
@@ -118,5 +118,23 @@ func callMCP(t *testing.T, serverURL string, id int, params map[string]any) {
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", response.StatusCode)
+	}
+}
+
+func TestRequestLogOmitsZeroResponseContentBytes(t *testing.T) {
+	zero := 0
+	data, err := json.Marshal(requestLogFields{DocumentsFound: &zero})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fields["response_content_bytes"]; ok {
+		t.Fatalf("zero response_content_bytes was not omitted: %s", data)
+	}
+	if value, ok := fields["documents_found"]; !ok || value != float64(0) {
+		t.Fatalf("zero documents_found missing: %s", data)
 	}
 }
