@@ -1,9 +1,13 @@
 title: mcp-chromadb-repo-search
 description: "An MCP server for semantically searching GitHub repository content indexed in ChromaDB."
 
-remote_theme: UnitVectorY-Labs/uvy-docs-theme@v0.2.0
+remote_theme: UnitVectorY-Labs/uvy-docs-theme@v0.4.0
 plugins:
   - jekyll-remote-theme
+
+uvy_docs:
+  license: "MIT License"
+  license_url: "https://github.com/UnitVectorY-Labs/mcp-chromadb-repo-search/blob/main/LICENSE"
 
 callouts:
   highlight:
