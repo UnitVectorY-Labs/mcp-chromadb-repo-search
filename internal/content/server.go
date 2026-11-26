@@ -2,7 +2,7 @@ package content
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -27,7 +27,7 @@ type requestLogFields struct {
 	Parameters           any    `json:"parameters,omitempty"`
 	Outcome              string `json:"outcome,omitempty"`
 	Error                string `json:"error,omitempty"`
-	ResponseContentBytes int    `json:"response_content_bytes,omitempty"`
+	ResponseContentBytes int    `json:"response_content_bytes,omitzero"`
 	DocumentsFound       *int   `json:"documents_found,omitempty"`
 }
 
